@@ -19,10 +19,25 @@ const userSchema = new mongoose.Schema({
     of: Number,
     default: {},
   },
+  progressHistory: [
+    {
+      module: {
+        type: String,
+        required: true,
+      },
+      percentageAdded: {
+        type: Number,
+        required: true,
+      },
+      timestamp: {
+        type: Date,
+        default: Date.now,
+      },
+    },
+  ],
   quizHistory: [
     {
       quizId: {
-        // Tambahkan field quizId
         type: String,
         required: true,
       },
