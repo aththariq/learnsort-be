@@ -1,9 +1,11 @@
-const express = require('express');
-const openai = require('../config/openaiConfig'); 
+const express = require("express");
+const openai = require("../config/openaiConfig");
+const User = require("../models/userModel");
+const { v4: uuidv4 } = require("uuid");
 
 // @desc    Generate quiz tentang sorting
 // @route   POST /api/quiz/generate
-// @access  Public
+// @access  Private
 const generateQuiz = async (req, res) => {
   try {
     // Request ke OpenRouter AI
@@ -12,14 +14,14 @@ const generateQuiz = async (req, res) => {
       messages: [
         {
           role: "user",
-          content: `Buatkan sebuah quiz tentang algoritma sorting dengan format berikut:
-  - Pertanyaan: [Pertanyaan tentang sorting]
-  - Pilihan jawaban:
-    A. [Jawaban A]
-    B. [Jawaban B]
-    C. [Jawaban C]
-    D. [Jawaban D]
-  - Kunci jawaban: [Huruf jawaban yang benar]`,
+          content: `Buatkan 8 soal quiz tentang algoritma sorting dengan format berikut untuk setiap soal:
+- Pertanyaan: [Pertanyaan tentang sorting]
+- Pilihan jawaban:
+  A. [Jawaban A]
+  B. [Jawaban B]
+  C. [Jawaban C]
+  D. [Jawaban D]
+- Kunci jawaban: [Huruf jawaban yang benar]`,
         },
       ],
     });
@@ -28,13 +30,43 @@ const generateQuiz = async (req, res) => {
     const quizText = completion.choices[0].message.content;
 
     // Parsing respons AI ke format JSON
-    const quiz = parseQuiz(quizText);
+    const quizzes = parseQuiz(quizText);
+
+    // Tambahkan ID unik ke setiap pertanyaan
+    const quizzesWithId = quizzes.map((quiz, index) => ({
+      id: (index + 1).toString(), // ID pertanyaan
+      ...quiz,
+    }));
+
+    // Buat ID unik untuk kuis ini
+    const quizId = uuidv4();
+
+    // Simpan quiz ke history user
+    const userId = req.user.id;
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    user.quizHistory.push({
+      quizId, // ID unik untuk kuis ini
+      quizzes: quizzesWithId,
+      score: 0, // Nilai awal 0
+      totalQuestions: quizzesWithId.length,
+      correctAnswers: 0, // Jawaban benar awal 0
+      startTime: new Date(),
+      endTime: null, // Waktu selesai diisi saat pengecekan
+    });
+
+    await user.save();
 
     res.status(200).json({
       message: "Quiz generated successfully",
-      quiz,
+      quizId, // Kirim ID kuis ke frontend
+      quizzes: quizzesWithId,
     });
   } catch (error) {
+    console.error("Error in generateQuiz:", error);
     res
       .status(500)
       .json({ message: "Failed to generate quiz", error: error.message });
@@ -43,54 +75,132 @@ const generateQuiz = async (req, res) => {
 
 // Fungsi untuk parsing quiz dari teks ke JSON
 const parseQuiz = (quizText) => {
+  const quizzes = [];
   const lines = quizText.split("\n");
-  const quiz = {
-    question: "",
-    options: {},
-    answer: "",
-  };
+  let currentQuiz = null;
 
   lines.forEach((line) => {
     if (line.startsWith("- Pertanyaan:")) {
-      quiz.question = line.replace("- Pertanyaan:", "").trim();
+      if (currentQuiz) quizzes.push(currentQuiz); // Simpan quiz sebelumnya
+      currentQuiz = {
+        question: line.replace("- Pertanyaan:", "").trim(),
+        options: {},
+        answer: "",
+      };
     } else if (line.startsWith("  A.")) {
-      quiz.options.A = line.replace("  A.", "").trim();
+      currentQuiz.options.A = line.replace("  A.", "").trim();
     } else if (line.startsWith("  B.")) {
-      quiz.options.B = line.replace("  B.", "").trim();
+      currentQuiz.options.B = line.replace("  B.", "").trim();
     } else if (line.startsWith("  C.")) {
-      quiz.options.C = line.replace("  C.", "").trim();
+      currentQuiz.options.C = line.replace("  C.", "").trim();
     } else if (line.startsWith("  D.")) {
-      quiz.options.D = line.replace("  D.", "").trim();
+      currentQuiz.options.D = line.replace("  D.", "").trim();
     } else if (line.startsWith("- Kunci jawaban:")) {
-      quiz.answer = line.replace("- Kunci jawaban:", "").trim();
+      currentQuiz.answer = line.replace("- Kunci jawaban:", "").trim();
     }
   });
 
-  return quiz;
+  if (currentQuiz) quizzes.push(currentQuiz); // Simpan quiz terakhir
+  return quizzes;
 };
 
 // @desc    Periksa jawaban quiz
 // @route   POST /api/quiz/check
-// @access  Public
+// @access  Private
 const checkAnswer = async (req, res) => {
-  const { userAnswer, correctAnswer } = req.body;
+  const { quizId, userAnswers } = req.body; // Data dari frontend
+  const userId = req.user.id; // ID user dari middleware auth
 
   try {
-    // Bandingkan jawaban user dengan kunci jawaban
-    const isCorrect = userAnswer.toUpperCase() === correctAnswer.toUpperCase();
+    // Ambil data user dari database
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Debugging: Log quizId dari request dan quizHistory
+    console.log("quizId from request:", quizId);
+    console.log("quizHistory:", user.quizHistory);
+
+    // Cari kuis berdasarkan quizId
+    const quiz = user.quizHistory.find((q) => q.quizId === quizId);
+    if (!quiz) {
+      return res.status(404).json({ message: "Quiz not found" });
+    }
+
+    // Hitung jumlah jawaban yang benar
+    let correctAnswers = 0;
+    quiz.quizzes.forEach((q) => {
+      const userAnswer = userAnswers[q.id]; // Ambil jawaban user berdasarkan ID pertanyaan
+      if (userAnswer && userAnswer.toUpperCase() === q.answer.toUpperCase()) {
+        correctAnswers++;
+      }
+    });
+
+    // Hitung nilai akhir
+    const totalQuestions = quiz.quizzes.length;
+    const score = (correctAnswers / totalQuestions) * 100;
+
+    // Update hasil quiz di database
+    quiz.score = score;
+    quiz.correctAnswers = correctAnswers;
+    quiz.endTime = new Date();
+
+    await user.save();
 
     res.status(200).json({
-      message: isCorrect ? "Jawaban benar!" : "Jawaban salah!",
-      isCorrect,
+      message: "Quiz checked successfully",
+      quizId,
+      score,
+      correctAnswers,
+      totalQuestions,
     });
   } catch (error) {
+    console.error("Error in checkAnswer:", error);
     res
       .status(400)
-      .json({ message: "Failed to check answer", error: error.message });
+      .json({ message: "Failed to check quiz", error: error.message });
+  }
+};
+
+// @desc    Get quiz history for a user
+// @route   GET /api/quiz/history
+// @access  Private
+const getQuizHistory = async (req, res) => {
+  const userId = req.user.id; // ID user dari middleware auth
+
+  try {
+    // Ambil data user dari database
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Format history kuis
+    const quizHistory = user.quizHistory.map((quiz) => ({
+      quizId: quiz.quizId,
+      score: quiz.score,
+      totalQuestions: quiz.totalQuestions,
+      correctAnswers: quiz.correctAnswers,
+      startTime: quiz.startTime,
+      endTime: quiz.endTime,
+    }));
+
+    res.status(200).json({
+      message: "Quiz history retrieved successfully",
+      quizHistory,
+    });
+  } catch (error) {
+    console.error("Error in getQuizHistory:", error);
+    res.status(500).json({
+      message: "Failed to retrieve quiz history",
+      error: error.message,
+    });
   }
 };
 
 module.exports = {
   generateQuiz,
   checkAnswer,
+  getQuizHistory,
 };
